@@ -12,14 +12,14 @@ COPY go.sum go.sum
 RUN go mod download
 
 # Copy the go source
-COPY cmd/manager/main.go cmd/manager/main.go
+COPY cmd/runner/main.go cmd/runner/main.go
 COPY api/ api/
 COPY controllers/ controllers/
 COPY runner/ runner/
 COPY utils/ utils/
 
 # Build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o tf-controller cmd/manager/main.go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o tf-runner cmd/runner/main.go
 
 ADD https://releases.hashicorp.com/terraform/1.1.4/terraform_1.1.4_linux_amd64.zip /terraform_1.1.4_linux_amd64.zip
 RUN unzip -q /terraform_1.1.4_linux_amd64.zip
@@ -31,17 +31,17 @@ LABEL org.opencontainers.image.source="https://github.com/chanwit/tf-controller"
 
 RUN apk add --no-cache ca-certificates tini git openssh-client gnupg
 
-COPY --from=builder /workspace/tf-controller /usr/local/bin/
+COPY --from=builder /workspace/tf-runner /usr/local/bin/
 COPY --from=builder /workspace/terraform /usr/local/bin/
 
 # Create minimal nsswitch.conf file to prioritize the usage of /etc/hosts over DNS queries.
 # https://github.com/gliderlabs/docker-alpine/issues/367#issuecomment-354316460
 RUN [ ! -e /etc/nsswitch.conf ] && echo 'hosts: files dns' > /etc/nsswitch.conf
 
-RUN addgroup -S controller && adduser -S controller -G controller && chmod +x /usr/local/bin/terraform
+RUN addgroup -S runner && adduser -S runner -G runner && chmod +x /usr/local/bin/terraform
 
-USER controller
+USER runner
 
 ENV GNUPGHOME=/tmp
 
-ENTRYPOINT [ "/sbin/tini", "--", "tf-controller" ]
+ENTRYPOINT [ "/sbin/tini", "--", "tf-runner" ]

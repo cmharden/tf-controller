@@ -17,10 +17,55 @@ limitations under the License.
 package main
 
 import (
-	"fmt"
-	_ "github.com/chanwit/tf-controller/runner"
+	"net"
+
+	infrav1 "github.com/chanwit/tf-controller/api/v1alpha1"
+	"github.com/chanwit/tf-controller/runner"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
+	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func main() {
-	fmt.Println("hello world")
+
+	scheme := runtime.NewScheme()
+
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		panic(err.Error())
+	}
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		panic(err.Error())
+	}
+	if err := infrav1.AddToScheme(scheme); err != nil {
+		panic(err.Error())
+	}
+
+	cfg := ctrl.GetConfigOrDie()
+	k8sClient, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		panic(err.Error())
+	}
+	if k8sClient == nil {
+		panic("k8sClient cannot be nil")
+	}
+
+	listener, err := net.Listen("tcp", ":8080")
+	if err != nil {
+		panic(err.Error())
+	}
+
+	server := grpc.NewServer()
+	// local runner, use the same client as the manager
+	runner.RegisterRunnerServer(server, &runner.TerraformRunnerServer{
+		Client: k8sClient,
+		Scheme: scheme,
+	})
+
+	if err := server.Serve(listener); err != nil {
+		panic(err.Error())
+	}
+
 }
