@@ -17,11 +17,13 @@ limitations under the License.
 package main
 
 import (
-	"github.com/chanwit/tf-controller/runner"
-	"google.golang.org/grpc"
 	"net"
 	"os"
 	"time"
+
+	"github.com/chanwit/tf-controller/mtls"
+	"github.com/chanwit/tf-controller/runner"
+	"google.golang.org/grpc"
 
 	infrav1 "github.com/chanwit/tf-controller/api/v1alpha1"
 	"github.com/chanwit/tf-controller/controllers"
@@ -35,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -128,6 +131,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TODO: persist and rotate
+	ca, err := mtls.CreateCA("*.tf-system", time.Minute*60)
+	if err != nil {
+		setupLog.Error(err, "unable to generate certificate authority bundle")
+		os.Exit(1)
+	}
+
+	// TODO: persist and rotate
+	controllerCert, err := ca.IssueCert("controller.tf-system", time.Minute*60)
+	if err != nil {
+		setupLog.Error(err, "unable to generate controller certificate bundle")
+		os.Exit(1)
+	}
+
 	if err = (&controllers.TerraformReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
@@ -135,6 +152,8 @@ func main() {
 		ExternalEventRecorder: eventRecorder,
 		MetricsRecorder:       metricsRecorder,
 		StatusPoller:          polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper()),
+		CertificateAuthority:  ca,
+		ControllerCertificate: controllerCert,
 	}).SetupWithManager(mgr, concurrent, httpRetry); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Terraform")
 		os.Exit(1)

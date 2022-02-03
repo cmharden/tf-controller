@@ -34,6 +34,7 @@ import (
 	"time"
 
 	infrav1 "github.com/chanwit/tf-controller/api/v1alpha1"
+	"github.com/chanwit/tf-controller/mtls"
 	"github.com/chanwit/tf-controller/runner"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/runtime/events"
@@ -55,6 +56,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kuberecorder "k8s.io/client-go/tools/record"
 	"k8s.io/client-go/tools/reference"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
@@ -78,6 +80,8 @@ type TerraformReconciler struct {
 	MetricsRecorder       *metrics.Recorder
 	StatusPoller          *polling.StatusPoller
 	Scheme                *runtime.Scheme
+	CertificateAuthority  *mtls.CertBundle
+	ControllerCertificate *mtls.CertBundle
 }
 
 //+kubebuilder:rbac:groups=infra.contrib.fluxcd.io,resources=terraforms,verbs=get;list;watch;create;update;patch;delete
@@ -1414,39 +1418,116 @@ func (r *TerraformReconciler) LookupOrCreateRunner(ctx context.Context, terrafor
 		runnerClient := runner.NewRunnerClient(conn)
 		return runnerClient, nil
 	} else {
-		// get pod
-		runnerPodKey := types.NamespacedName{
-			Name:      fmt.Sprintf("%s-runner", terraform.Name),
-			Namespace: terraform.Namespace,
+		// this is a POC
+		// TODO: add rotation and cleanup
+		// generate cert
+		cert, err := r.CertificateAuthority.IssueCert(fmt.Sprintf("%s-runner.tf-system", terraform.Name), time.Hour)
+		if err != nil {
+			return nil, err
 		}
-		var runnerPod corev1.Pod
-		err := r.Client.Get(ctx, runnerPodKey, &runnerPod)
-		if err == nil && apierrors.IsNotFound(err) {
-			/*
-				runnerPod = corev1.Pod{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      runnerPodKey.Name,
-						Namespace: runnerPodKey.Namespace,
-					},
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:    "",
-								Image:   "",
-								Command: nil,
-								Args:    nil,
+
+		// create tls secret
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: terraform.Namespace,
+				Name:      fmt.Sprintf("%s-runner.tls", terraform.Name),
+			},
+		}
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, secret, func() error {
+			secret.Data = map[string][]byte{
+				"ca.crt":  r.CertificateAuthority.CertPEM,
+				"tls.crt": cert.CertPEM,
+				"tls.key": cert.KeyPEM,
+			}
+
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		runner := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: terraform.Namespace,
+				Name:      fmt.Sprintf("%s-runner", terraform.Name),
+				Labels: map[string]string{
+					"app": fmt.Sprintf("%s-runner", terraform.Name),
+				},
+			},
+		}
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, runner, func() error {
+			if runner.CreationTimestamp.IsZero() {
+				runner.Spec = corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "server",
+							Image: "ghcr.io/phoban01/grpc-server:v1.0.0-alpha",
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "grpc",
+									ContainerPort: 5000,
+								},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      "tls",
+									MountPath: "/tls",
+								},
 							},
 						},
 					},
-					Status: corev1.PodStatus{},
+					Volumes: []corev1.Volume{
+						{
+							Name: "tls",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: fmt.Sprintf("%s-runner.tls", terraform.Name),
+								},
+							},
+						},
+					},
 				}
-				if err := r.Client.Create(ctx, &runnerPod); err != nil {
-					return nil, err
-				}
-			*/
-			// Not Implement Yet
+			}
+			return nil
+		})
+		if err != nil {
 			return nil, err
-		} else if err != nil {
+		}
+
+		runnerSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: terraform.Namespace,
+				Name:      fmt.Sprintf("%s-runner", terraform.Name),
+			},
+		}
+		_, err = controllerutil.CreateOrUpdate(ctx, r.Client, runnerSvc, func() error {
+			if runnerSvc.CreationTimestamp.IsZero() {
+				runnerSvc.Spec = corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Name:       "grpc",
+							Port:       5000,
+							TargetPort: intstr.FromInt(5000),
+						},
+					},
+					Selector: map[string]string{
+						"app": fmt.Sprintf("%s-runner", terraform.Name),
+					},
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		creds, err := mtls.GetGRPCClientCredentials(r.ControllerCertificate, r.CertificateAuthority.CertPEM)
+		if err != nil {
+			return nil, err
+		}
+
+		_, err = grpc.Dial(fmt.Sprintf("%s-runner.%s.svc.cluster.local", terraform.Name, terraform.Namespace), grpc.WithTransportCredentials(creds))
+		if err != nil {
 			return nil, err
 		}
 
